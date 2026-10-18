@@ -1,0 +1,1284 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>トミカ風カスタムガレージ</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      touch-action: none;
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #1a222d;
+      font-family: "Hiragino Maru Gothic ProN", "Rounded Mplus 1c", sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+  </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/**
+ * ==========================================
+ * 1. 内蔵シンセサイザー (Web Audio API)
+ * ==========================================
+ */
+class SoundEngine {
+  constructor() {
+    this.ctx = null;
+    this.bgmTimer = null;
+    this.bgmStep = 0;
+    this.isMuted = false;
+  }
+
+  init() {
+    if (!this.ctx) {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AudioCtx();
+    }
+    if (this.ctx.state === 'suspended') {
+      this.ctx.resume();
+    }
+  }
+
+  // パーツを持ち上げた音
+  playPickup() {
+    if (this.isMuted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(320, t);
+    osc.frequency.exponentialRampToValueAtTime(580, t + 0.08);
+    gain.gain.setValueAtTime(0.2, t);
+    gain.gain.exponentialRampToValueAtTime(0.01, t + 0.09);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.09);
+  }
+
+  // 元の場所に戻った音（ボヨン）
+  playReturn() {
+    if (this.isMuted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(300, t);
+    osc.frequency.exponentialRampToValueAtTime(160, t + 0.15);
+    gain.gain.setValueAtTime(0.2, t);
+    gain.gain.exponentialRampToValueAtTime(0.01, t + 0.16);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.16);
+  }
+
+  // ダイキャスト合体音（カチャッ！ガシャン！）
+  playSnap() {
+    if (this.isMuted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+
+    // 1. 金属クリック音（高域）
+    const osc1 = this.ctx.createOscillator();
+    const gain1 = this.ctx.createGain();
+    osc1.type = 'square';
+    osc1.frequency.setValueAtTime(1200, t);
+    osc1.frequency.exponentialRampToValueAtTime(300, t + 0.05);
+    gain1.gain.setValueAtTime(0.25, t);
+    gain1.gain.exponentialRampToValueAtTime(0.01, t + 0.06);
+    osc1.connect(gain1);
+    gain1.connect(this.ctx.destination);
+    osc1.start(t);
+    osc1.stop(t + 0.06);
+
+    // 2. 重い合体インパクト（低域＋金属倍音）
+    const osc2 = this.ctx.createOscillator();
+    const gain2 = this.ctx.createGain();
+    osc2.type = 'sawtooth';
+    osc2.frequency.setValueAtTime(180, t + 0.03);
+    osc2.frequency.exponentialRampToValueAtTime(55, t + 0.22);
+    gain2.gain.setValueAtTime(0.4, t + 0.03);
+    gain2.gain.exponentialRampToValueAtTime(0.01, t + 0.24);
+    osc2.connect(gain2);
+    gain2.connect(this.ctx.destination);
+    osc2.start(t + 0.03);
+    osc2.stop(t + 0.24);
+
+    // 3. ホワイトノイズで「ガシャン」の質感
+    const bufferSize = this.ctx.sampleRate * 0.12;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.3));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 1800;
+    const nGain = this.ctx.createGain();
+    nGain.gain.setValueAtTime(0.35, t + 0.02);
+    nGain.gain.exponentialRampToValueAtTime(0.01, t + 0.14);
+    noise.connect(filter);
+    filter.connect(nGain);
+    nGain.connect(this.ctx.destination);
+    noise.start(t + 0.02);
+  }
+
+  // 完成ファンファーレ＆エンジン始動
+  playComplete() {
+    if (this.isMuted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const notes = [523.25, 659.25, 783.99, 1046.50]; // ド・ミ・ソ・高ド
+    notes.forEach((freq, idx) => {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      const start = t + idx * 0.11;
+      const dur = idx === 3 ? 0.45 : 0.1;
+      osc.frequency.setValueAtTime(freq, start);
+      gain.gain.setValueAtTime(0.3, start);
+      gain.gain.exponentialRampToValueAtTime(0.01, start + dur);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(start);
+      osc.stop(start + dur);
+    });
+
+    // エンジンふかし音（ブルルン！）
+    setTimeout(() => this.playEngineRev(), 500);
+  }
+
+  playEngineRev() {
+    if (this.isMuted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(65, t);
+    osc.frequency.linearRampToValueAtTime(140, t + 0.2);
+    osc.frequency.linearRampToValueAtTime(80, t + 0.5);
+    gain.gain.setValueAtTime(0.25, t);
+    gain.gain.exponentialRampToValueAtTime(0.01, t + 0.55);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.55);
+  }
+
+  // クラクション＆サイレン・アクション音
+  playActionSound(theme) {
+    if (this.isMuted || !this.ctx) return;
+    const t = this.ctx.currentTime;
+
+    if (theme === 'police' || theme === 'ambulance') {
+      // サイレン風「ウーウー / ピーポー」
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      if (theme === 'ambulance') {
+        osc.frequency.setValueAtTime(960, t);
+        osc.frequency.setValueAtTime(770, t + 0.2);
+      } else {
+        osc.frequency.setValueAtTime(600, t);
+        osc.frequency.exponentialRampToValueAtTime(1100, t + 0.35);
+      }
+      gain.gain.setValueAtTime(0.25, t);
+      gain.gain.exponentialRampToValueAtTime(0.01, t + 0.4);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.4);
+    } else {
+      // 元気なクラクション「プップー！」
+      [0, 0.14].forEach((offset, i) => {
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sawtooth';
+        const dur = i === 0 ? 0.1 : 0.22;
+        osc.frequency.setValueAtTime(440, t + offset);
+        gain.gain.setValueAtTime(0.2, t + offset);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + offset + dur);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(t + offset);
+        osc.stop(t + offset + dur);
+      });
+    }
+  }
+
+  // BGMループ開始
+  startBGM(mode = 'build') {
+    this.stopBGM();
+    if (!this.ctx) return;
+    this.bgmStep = 0;
+    const tempo = mode === 'drive' ? 150 : 220; // 走行中はテンポアップ
+
+    const buildMelody = [261.6, 329.6, 392.0, 329.6, 293.7, 349.2, 440.0, 349.2];
+    const driveMelody = [523.3, 523.3, 659.3, 784.0, 659.3, 784.0, 1046.5, 784.0];
+    const seq = mode === 'drive' ? driveMelody : buildMelody;
+
+    this.bgmTimer = setInterval(() => {
+      if (this.isMuted || !this.ctx || this.ctx.state !== 'running') return;
+      const t = this.ctx.currentTime;
+      const freq = seq[this.bgmStep % seq.length];
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = mode === 'drive' ? 'square' : 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      gain.gain.setValueAtTime(mode === 'drive' ? 0.05 : 0.06, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(t);
+      osc.stop(t + 0.15);
+      this.bgmStep++;
+    }, tempo);
+  }
+
+  stopBGM() {
+    if (this.bgmTimer) {
+      clearInterval(this.bgmTimer);
+      this.bgmTimer = null;
+    }
+  }
+}
+
+const sound = new SoundEngine();
+
+/**
+ * ==========================================
+ * 2. 10スロットのパーツ定義データ
+ * ==========================================
+ */
+const SLOTS = [
+  { key: 'frame',       label: '① シャシー（土台）',     anchor: { x: 0,    y: 45 } },
+  { key: 'frontWheel',  label: '② まえの タイヤ',        anchor: { x: -105, y: 72 } },
+  { key: 'rearWheel',   label: '③ うしろの タイヤ',      anchor: { x: 105,  y: 72 } },
+  { key: 'cabin',       label: '④ うんてんせき',         anchor: { x: -55,  y: -5 } },
+  { key: 'rearBody',    label: '⑤ うしろの ボディ',      anchor: { x: 75,   y: -5 } },
+  { key: 'bumper',      label: '⑥ フロントバンパー',     anchor: { x: -175, y: 35 } },
+  { key: 'light',       label: '⑦ ヘッドライト',         anchor: { x: -155, y: 0  } },
+  { key: 'roof',        label: '⑧ やねの そうび',        anchor: { x: -25,  y: -75} },
+  { key: 'rearGimmick', label: '⑨ うしろの メカ',        anchor: { x: 145,  y: -45} },
+  { key: 'sideExhaust', label: '⑩ マフラー・ステップ',   anchor: { x: 0,    y: 55 } }
+];
+
+// 各スロットのパーツバリエーション（police, ambulance, fire, heavy）
+const PARTS_DB = {
+  frame: [
+    { id: 'f_pol', theme: 'police',    name: 'パトカーフレーム',   color: '#2b2d42', sub: '#e0e1dd' },
+    { id: 'f_amb', theme: 'ambulance', name: '救急ホワイト台座',   color: '#f8f9fa', sub: '#e63946' },
+    { id: 'f_fir', theme: 'fire',      name: '消防レッドフレーム', color: '#d90429', sub: '#adb5bd' },
+    { id: 'f_hvy', theme: 'heavy',     name: '重機イエロー骨格',   color: '#ffb703', sub: '#343a40' }
+  ],
+  frontWheel: [
+    { id: 'fw_pol', theme: 'police',    name: 'スピードタイヤ',     kind: 'normal',  color: '#212529', rim: '#ced4da' },
+    { id: 'fw_amb', theme: 'ambulance', name: '救急ホワイトタイヤ', kind: 'normal',  color: '#343a40', rim: '#ffffff' },
+    { id: 'fw_fir', theme: 'fire',      name: 'ビッグタイヤ',       kind: 'big',     color: '#1b1b1e', rim: '#ffbe0b' },
+    { id: 'fw_hvy', theme: 'heavy',     name: 'まえキャタピラ',     kind: 'crawler', color: '#495057', rim: '#ffb703' }
+  ],
+  rearWheel: [
+    { id: 'rw_pol', theme: 'police',    name: 'ワイドタイヤ',       kind: 'normal',  color: '#212529', rim: '#ced4da' },
+    { id: 'rw_amb', theme: 'ambulance', name: 'ダブルタイヤ',       kind: 'double',  color: '#343a40', rim: '#ffffff' },
+    { id: 'rw_fir', theme: 'fire',      name: 'オフロード大タイヤ', kind: 'big',     color: '#1b1b1e', rim: '#e63946' },
+    { id: 'rw_hvy', theme: 'heavy',     name: 'うしろキャタピラ',   kind: 'crawler', color: '#495057', rim: '#ffb703' }
+  ],
+  cabin: [
+    { id: 'cb_pol', theme: 'police',    name: 'パトカーキャビン',   kind: 'sedan',   color: '#ffffff', sub: '#1d1e22' },
+    { id: 'cb_amb', theme: 'ambulance', name: '救急キャビン',       kind: 'van',     color: '#ffffff', sub: '#e63946' },
+    { id: 'cb_fir', theme: 'fire',      name: '消防トラック席',     kind: 'truck',   color: '#d90429', sub: '#ffba08' },
+    { id: 'cb_hvy', theme: 'heavy',     name: '重機コックピット',   kind: 'heavy',   color: '#ffb703', sub: '#212529' }
+  ],
+  rearBody: [
+    { id: 'rb_pol', theme: 'police',    name: 'パトカートランク',   kind: 'trunk',   color: '#1d1e22', sub: '#ffffff' },
+    { id: 'rb_amb', theme: 'ambulance', name: '救急ルーム',         kind: 'box',     color: '#ffffff', sub: '#e63946' },
+    { id: 'rb_fir', theme: 'fire',      name: '消防タンク',         kind: 'tank',    color: '#d90429', sub: '#adb5bd' },
+    { id: 'rb_hvy', theme: 'heavy',     name: 'ダンプ荷台',         kind: 'dump',    color: '#fb8500', sub: '#495057' }
+  ],
+  bumper: [
+    { id: 'bp_pol', theme: 'police',    name: 'パトロールガード',   kind: 'guard',   color: '#212529', sub: '#adb5bd' },
+    { id: 'bp_amb', theme: 'ambulance', name: 'ホワイトバンパー',   kind: 'clean',   color: '#f8f9fa', sub: '#e63946' },
+    { id: 'bp_fir', theme: 'fire',      name: 'メッキバンパー',     kind: 'chrome',  color: '#dee2e6', sub: '#ffbe0b' },
+    { id: 'bp_hvy', theme: 'heavy',     name: 'ドーザーブレード',   kind: 'dozer',   color: '#ffb703', sub: '#212529' }
+  ],
+  light: [
+    { id: 'lt_pol', theme: 'police',    name: 'パトロールLED',      kind: 'twin',    color: '#4cc9f0' },
+    { id: 'lt_amb', theme: 'ambulance', name: 'クリア丸ライト',     kind: 'round',   color: '#fff3b0' },
+    { id: 'lt_fir', theme: 'fire',      name: '角型フォグライト',   kind: 'square',  color: '#ffbe0b' },
+    { id: 'lt_hvy', theme: 'heavy',     name: '大型サーチライト',   kind: 'search',  color: '#ffd166' }
+  ],
+  roof: [
+    { id: 'rf_pol', theme: 'police',    name: '赤色パトランプ',     kind: 'siren',   color: '#ef233c' },
+    { id: 'rf_amb', theme: 'ambulance', name: 'ワイド救急ライト',   kind: 'bar',     color: '#e63946' },
+    { id: 'rf_fir', theme: 'fire',      name: 'のびるハシゴ',       kind: 'ladder',  color: '#e9ecef' },
+    { id: 'rf_hvy', theme: 'heavy',     name: 'ロケットブースター', kind: 'rocket',  color: '#3a86ff' }
+  ],
+  rearGimmick: [
+    { id: 'rg_pol', theme: 'police',    name: 'レーシングウイング', kind: 'wing',    color: '#1d1e22' },
+    { id: 'rg_amb', theme: 'ambulance', name: 'リアラダー',         kind: 'rearlad', color: '#adb5bd' },
+    { id: 'rg_fir', theme: 'fire',      name: '放水銃ノズル',       kind: 'cannon',  color: '#ced4da' },
+    { id: 'rg_hvy', theme: 'heavy',     name: 'ショベルアーム',     kind: 'arm',     color: '#ffb703' }
+  ],
+  sideExhaust: [
+    { id: 'se_pol', theme: 'police',    name: 'ツインマフラー',     kind: 'twin',    color: '#ced4da' },
+    { id: 'se_amb', theme: 'ambulance', name: 'サイドステップ',     kind: 'step',    color: '#e9ecef' },
+    { id: 'se_fir', theme: 'fire',      name: 'メッキタンク管',     kind: 'pipe',    color: '#adb5bd' },
+    { id: 'se_hvy', theme: 'heavy',     name: 'えんとつマフラー',   kind: 'stack',   color: '#495057' }
+  ]
+};
+
+/**
+ * ==========================================
+ * 3. ゲーム状態管理
+ * ==========================================
+ */
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let W = canvas.width = window.innerWidth;
+let H = canvas.height = window.innerHeight;
+
+window.addEventListener('resize', () => {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  updateLayout();
+});
+
+let gameState = 'BUILD'; // 'BUILD' | 'READY' | 'DRIVE'
+let currentStep = 0;
+let installedParts = {};
+let preferredTheme = null;
+let choices = []; // 現在の3択カード
+
+// ドラッグ＆吸着アニメーション管理
+let activeDrag = null; // { choiceIndex, part, x, y, startX, startY, moved }
+let snappingPart = null; // { part, slotKey, x, y, targetX, targetY, progress }
+let carBounceY = 0;
+let carBounceVy = 0;
+
+// 走行モード用変数
+let driveTime = 0;
+let roadScroll = 0;
+let carDriveX = 0;
+let carDriveY = 0;
+let carJumpVy = 0;
+let carWheelie = 0;
+let boostTimer = 0;
+let particles = [];
+
+// レイアウト座標
+let carCenter = { x: 0, y: 0, scale: 1 };
+let trayY = 0;
+let cardRects = [];
+
+function updateLayout() {
+  const isShort = H < 600;
+  carCenter.x = W * 0.5;
+  carCenter.y = H * 0.36;
+  carCenter.scale = Math.min(W / 680, H / 560) * (isShort ? 0.95 : 1.1);
+  trayY = H * 0.67;
+
+  const cardW = Math.min(W * 0.28, 240);
+  const cardH = Math.min(H * 0.27, 190);
+  const gap = Math.min(W * 0.035, 30);
+  const totalW = cardW * 3 + gap * 2;
+  const startX = (W - totalW) / 2;
+
+  cardRects = [0, 1, 2].map(i => ({
+    x: startX + i * (cardW + gap),
+    y: trayY,
+    w: cardW,
+    h: cardH
+  }));
+}
+updateLayout();
+
+/**
+ * ==========================================
+ * 4. 3択ドラフト生成ロジック
+ * ==========================================
+ */
+function initNewCar() {
+  gameState = 'BUILD';
+  currentStep = 0;
+  installedParts = {};
+  preferredTheme = null;
+  carBounceY = 0;
+  carBounceVy = 0;
+  particles = [];
+  generateChoicesForStep(0);
+  sound.startBGM('build');
+}
+
+function generateChoicesForStep(stepIdx) {
+  const slot = SLOTS[stepIdx];
+  const pool = [...PARTS_DB[slot.key]];
+
+  let selected = [];
+  if (preferredTheme) {
+    // 1枠目：直前に選んだ車種の純正パーツ（揃えやすくする）
+    const mainPart = pool.find(p => p.theme === preferredTheme);
+    if (mainPart) selected.push(mainPart);
+    // 2枠目：ワイルド系（heavy）がまだ入っていなければ優先候補に
+    const rest = pool.filter(p => !selected.includes(p));
+    rest.sort(() => Math.random() - 0.5);
+    selected.push(...rest.slice(0, 3 - selected.length));
+  } else {
+    pool.sort(() => Math.random() - 0.5);
+    selected = pool.slice(0, 3);
+  }
+
+  // 表示順をシャッフル
+  selected.sort(() => Math.random() - 0.5);
+  choices = selected.map((part, idx) => ({
+    part,
+    slotKey: slot.key,
+    wobble: 0
+  }));
+}
+
+/**
+ * ==========================================
+ * 5. トミカ風ダイキャスト描画関数群
+ * ==========================================
+ */
+// 光沢のある角丸ボックスを描画するヘルパー
+function drawGlossyBox(ctx, x, y, w, h, r, mainColor, strokeColor = '#111') {
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, r);
+  ctx.fillStyle = mainColor;
+  ctx.fill();
+
+  // 上部のメタリックハイライト
+  const grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, 'rgba(255,255,255,0.55)');
+  grad.addColorStop(0.25, 'rgba(255,255,255,0.1)');
+  grad.addColorStop(0.8, 'rgba(0,0,0,0.15)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.35)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // 斜めのツヤ反射ライン
+  ctx.clip();
+  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.beginPath();
+  ctx.moveTo(x + w * 0.15, y);
+  ctx.lineTo(x + w * 0.35, y);
+  ctx.lineTo(x + w * 0.15, y + h);
+  ctx.lineTo(x - w * 0.05, y + h);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.restore();
+
+  // ダイキャスト風の太め輪郭
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, r);
+  ctx.lineWidth = 3.5;
+  ctx.strokeStyle = strokeColor;
+  ctx.stroke();
+  ctx.restore();
+}
+
+// 個別パーツの描画（原点 (0,0) が各スロットのアンカー位置）
+function drawSinglePart(ctx, slotKey, part, animTime = 0, isDriving = false) {
+  ctx.save();
+
+  switch (slotKey) {
+    case 'frame': {
+      drawGlossyBox(ctx, -165, -14, 330, 28, 10, part.color);
+      // メッキシャーシライン
+      drawGlossyBox(ctx, -145, 4, 290, 12, 5, part.sub);
+      break;
+    }
+
+    case 'frontWheel':
+    case 'rearWheel': {
+      const rot = isDriving ? animTime * 14 : 0;
+      if (part.kind === 'crawler') {
+        // キャタピラ（無限軌道）
+        drawGlossyBox(ctx, -48, -22, 96, 48, 22, '#2b2d42');
+        drawGlossyBox(ctx, -38, -12, 76, 28, 14, part.rim);
+        for (let i = -24; i <= 24; i += 24) {
+          ctx.save();
+          ctx.translate(i, 2);
+          ctx.rotate(rot);
+          ctx.fillStyle = '#212529';
+          ctx.beginPath();
+          ctx.arc(0, 0, 10, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#dee2e6';
+          ctx.fillRect(-3, -8, 6, 16);
+          ctx.restore();
+        }
+      } else {
+        const radius = part.kind === 'big' ? 44 : 35;
+        if (part.kind === 'double') {
+          // ダブルタイヤ奥側
+          ctx.fillStyle = '#111';
+          ctx.beginPath();
+          ctx.arc(-12, -4, radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.save();
+        ctx.rotate(rot);
+        // タイヤゴム
+        ctx.fillStyle = part.color;
+        ctx.beginPath();
+        ctx.arc(0, 0, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#111';
+        ctx.stroke();
+        // メッキホイール
+        ctx.fillStyle = part.rim;
+        ctx.beginPath();
+        ctx.arc(0, 0, radius * 0.58, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        // ホイールのスポーク
+        ctx.fillStyle = '#222';
+        for (let a = 0; a < 4; a++) {
+          ctx.rotate(Math.PI / 2);
+          ctx.fillRect(-4, 6, 8, radius * 0.42);
+        }
+        ctx.restore();
+      }
+      break;
+    }
+
+    case 'cabin': {
+      // 運転席キャビン
+      if (part.kind === 'sedan') {
+        // パトカー風ツートンキャビン
+        drawGlossyBox(ctx, -95, -55, 130, 85, 18, part.color);
+        drawGlossyBox(ctx, -95, -5, 130, 35, 8, part.sub);
+        // 窓ガラス
+        drawGlossyBox(ctx, -78, -46, 85, 36, 10, '#4cc9f0');
+        // 警視庁バッジ風マーク
+        ctx.fillStyle = '#ffd166';
+        ctx.beginPath();
+        ctx.arc(-25, 12, 8, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (part.kind === 'van') {
+        // 救急キャビン
+        drawGlossyBox(ctx, -95, -62, 130, 92, 16, part.color);
+        ctx.fillStyle = part.sub;
+        ctx.fillRect(-93, 2, 126, 12);
+        drawGlossyBox(ctx, -82, -50, 85, 42, 8, '#4cc9f0');
+      } else if (part.kind === 'truck') {
+        // 消防角型キャビン
+        drawGlossyBox(ctx, -95, -68, 125, 98, 12, part.color);
+        drawGlossyBox(ctx, -85, -54, 78, 45, 8, '#4cc9f0');
+        ctx.fillStyle = part.sub;
+        ctx.fillRect(-93, 5, 121, 10);
+      } else {
+        // 重機コックピット
+        drawGlossyBox(ctx, -85, -68, 118, 98, 14, part.color);
+        drawGlossyBox(ctx, -72, -56, 90, 56, 8, '#90e0ef');
+      }
+      break;
+    }
+
+    case 'rearBody': {
+      if (part.kind === 'trunk') {
+        // セダン後部＋白黒ライン
+        drawGlossyBox(ctx, -40, -35, 120, 65, 14, part.color);
+        drawGlossyBox(ctx, -40, -35, 120, 28, 10, part.sub);
+      } else if (part.kind === 'box') {
+        // 救急車コンテナ（赤十字マーク付き）
+        drawGlossyBox(ctx, -42, -62, 130, 92, 12, part.color);
+        ctx.fillStyle = part.sub;
+        ctx.fillRect(-40, 2, 126, 12);
+        // 赤十字
+        ctx.fillRect(15, -42, 14, 34);
+        ctx.fillRect(5, -32, 34, 14);
+      } else if (part.kind === 'tank') {
+        // 消防ポンプ・シャッター
+        drawGlossyBox(ctx, -42, -58, 130, 88, 10, part.color);
+        drawGlossyBox(ctx, -20, -42, 86, 54, 6, part.sub);
+        ctx.strokeStyle = '#495057';
+        ctx.lineWidth = 2;
+        for (let y = -32; y < 8; y += 10) {
+          ctx.beginPath();
+          ctx.moveTo(-18, y);
+          ctx.lineTo(64, y);
+          ctx.stroke();
+        }
+      } else {
+        // ダンプ荷台（砂利入り）
+        const tilt = isDriving ? Math.sin(animTime * 8) * 0.06 : 0;
+        ctx.rotate(tilt);
+        // 砂利
+        ctx.fillStyle = '#6c757d';
+        ctx.beginPath();
+        ctx.arc(10, -48, 32, Math.PI, 0);
+        ctx.arc(45, -45, 28, Math.PI, 0);
+        ctx.fill();
+        drawGlossyBox(ctx, -42, -52, 135, 82, 10, part.color);
+      }
+      break;
+    }
+
+    case 'bumper': {
+      if (part.kind === 'dozer') {
+        // 巨大ドーザーブレード
+        const lift = isDriving ? Math.sin(animTime * 10) * 5 : 0;
+        ctx.translate(0, lift);
+        drawGlossyBox(ctx, -15, -5, 36, 14, 4, '#212529');
+        drawGlossyBox(ctx, -42, -38, 32, 68, 8, part.color);
+      } else if (part.kind === 'guard') {
+        // パトカーバンパーガード
+        drawGlossyBox(ctx, -18, -22, 32, 42, 6, part.color);
+        drawGlossyBox(ctx, -12, -16, 16, 30, 4, part.sub);
+      } else {
+        // メッキ・ホワイトバンパー
+        drawGlossyBox(ctx, -18, -8, 36, 26, 8, part.color);
+      }
+      break;
+    }
+
+    case 'light': {
+      // ヘッドライト＋走行時の光のビーム
+      if (isDriving || gameState === 'READY') {
+        ctx.save();
+        const beamGrad = ctx.createLinearGradient(-15, 0, -220, 0);
+        beamGrad.addColorStop(0, 'rgba(255, 250, 180, 0.75)');
+        beamGrad.addColorStop(1, 'rgba(255, 250, 180, 0)');
+        ctx.fillStyle = beamGrad;
+        ctx.beginPath();
+        ctx.moveTo(-10, -10);
+        ctx.lineTo(-220, -65);
+        ctx.lineTo(-220, 55);
+        ctx.lineTo(-10, 15);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+      const r = part.kind === 'search' ? 22 : 16;
+      drawGlossyBox(ctx, -14, -r, 28, r * 2, 8, part.color);
+      break;
+    }
+
+    case 'roof': {
+      if (part.kind === 'siren' || part.kind === 'bar') {
+        const w = part.kind === 'bar' ? 88 : 54;
+        // 台座
+        drawGlossyBox(ctx, -w / 2, -6, w, 14, 4, '#dee2e6');
+        // 赤色灯本体
+        drawGlossyBox(ctx, -w / 2 + 4, -24, w - 8, 20, 10, part.color);
+        // 発光エフェクト
+        if ((isDriving || gameState === 'READY') && Math.floor(animTime * 10) % 2 === 0) {
+          ctx.fillStyle = 'rgba(255, 50, 50, 0.65)';
+          ctx.beginPath();
+          ctx.arc(0, -14, 38, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (part.kind === 'ladder') {
+        // のびるハシゴ
+        const ext = isDriving ? Math.abs(Math.sin(animTime * 4)) * 45 : 0;
+        ctx.rotate(isDriving ? -0.18 : -0.08);
+        drawGlossyBox(ctx, -45, -18, 150 + ext, 22, 6, part.color);
+        ctx.fillStyle = '#d90429';
+        for (let x = -30; x < 90 + ext; x += 22) {
+          ctx.fillRect(x, -14, 6, 14);
+        }
+      } else if (part.kind === 'rocket') {
+        // ロケットブースター
+        drawGlossyBox(ctx, -40, -28, 95, 36, 16, part.color);
+        drawGlossyBox(ctx, 45, -22, 20, 24, 4, '#ffbe0b');
+        if (isDriving) {
+          ctx.fillStyle = '#ff006e';
+          ctx.beginPath();
+          ctx.moveTo(65, -20);
+          ctx.lineTo(115 + Math.random() * 35, -10);
+          ctx.lineTo(65, 0);
+          ctx.fill();
+        }
+      }
+      break;
+    }
+
+    case 'rearGimmick': {
+      if (part.kind === 'arm') {
+        // ショベルアーム
+        const swing = isDriving ? Math.sin(animTime * 6) * 0.35 : 0;
+        ctx.rotate(swing);
+        drawGlossyBox(ctx, -10, -45, 24, 65, 8, part.color);
+        ctx.translate(4, -40);
+        ctx.rotate(0.7);
+        drawGlossyBox(ctx, -8, -45, 20, 55, 8, part.color);
+        // バケット
+        drawGlossyBox(ctx, -16, -65, 38, 28, 6, '#343a40');
+      } else if (part.kind === 'wing') {
+        // 大型レーシングウイング
+        drawGlossyBox(ctx, -8, -32, 16, 40, 4, '#adb5bd');
+        drawGlossyBox(ctx, -28, -42, 56, 16, 6, part.color);
+      } else if (part.kind === 'cannon') {
+        // 放水銃
+        drawGlossyBox(ctx, -14, -30, 38, 22, 8, part.color);
+        if (isDriving && boostTimer > 0) {
+          ctx.fillStyle = '#4cc9f0';
+          ctx.beginPath();
+          ctx.arc(45, -20, 14, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        // リアラダー
+        drawGlossyBox(ctx, -8, -32, 20, 55, 6, part.color);
+      }
+      break;
+    }
+
+    case 'sideExhaust': {
+      if (part.kind === 'stack') {
+        // えんとつマフラー（縦パイプ）
+        drawGlossyBox(ctx, 20, -95, 20, 95, 6, part.color);
+        if (isDriving && Math.random() < 0.4) {
+          particles.push({
+            x: carCenter.x + 30,
+            y: carCenter.y - 95,
+            vx: 3 + Math.random() * 2,
+            vy: -2 - Math.random() * 2,
+            size: 14 + Math.random() * 12,
+            color: 'rgba(100,100,100,0.6)',
+            life: 1
+          });
+        }
+      } else {
+        // サイドマフラー＆ステップ
+        drawGlossyBox(ctx, -60, -8, 120, 18, 8, part.color);
+      }
+      break;
+    }
+  }
+
+  ctx.restore();
+}
+
+// 組み立てられた車全体を描画（車は左向き＝前方が左）
+function drawAssembledCar(ctx, cx, cy, scale, animTime, isDriving) {
+  ctx.save();
+  ctx.translate(cx, cy + carBounceY);
+  ctx.scale(scale, scale);
+
+  if (isDriving) {
+    // 走行中の揺れとウィリー角度
+    const rumble = installedParts.frontWheel?.kind === 'crawler' ? Math.sin(animTime * 40) * 3.5 : Math.sin(animTime * 20) * 1.5;
+    ctx.translate(0, rumble);
+    ctx.rotate(carWheelie);
+  }
+
+  // 地面の影
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.beginPath();
+  ctx.ellipse(0, 110, 195, 18, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 現在のターゲットスロットの点滅ガイド（BUILD中のみ）
+  if (gameState === 'BUILD' && currentStep < SLOTS.length) {
+    const targetSlot = SLOTS[currentStep];
+    const pulse = 1 + Math.sin(animTime * 8) * 0.15;
+    ctx.save();
+    ctx.translate(targetSlot.anchor.x, targetSlot.anchor.y);
+    ctx.scale(pulse, pulse);
+    ctx.strokeStyle = '#ffbe0b';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([8, 6]);
+    ctx.fillStyle = 'rgba(255, 190, 11, 0.22)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 42, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // レイヤー順（奥から手前へ綺麗に重なる順番）で装着済みパーツを描画
+  const renderOrder = [
+    'rearGimmick', 'frame', 'rearBody', 'cabin',
+    'roof', 'bumper', 'light', 'sideExhaust',
+    'rearWheel', 'frontWheel'
+  ];
+
+  renderOrder.forEach(slotKey => {
+    const part = installedParts[slotKey];
+    if (part) {
+      const slotDef = SLOTS.find(s => s.key === slotKey);
+      ctx.save();
+      ctx.translate(slotDef.anchor.x, slotDef.anchor.y);
+      drawSinglePart(ctx, slotKey, part, animTime, isDriving);
+      ctx.restore();
+    }
+  });
+
+  ctx.restore();
+}
+
+/**
+ * ==========================================
+ * 6. タッチ・スライド吸着イベント処理
+ * ==========================================
+ */
+function getPointerPos(e) {
+  if (e.changedTouches && e.changedTouches.length > 0) {
+    return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  }
+  return { x: e.clientX, y: e.clientY };
+}
+
+function onPointerDown(e) {
+  e.preventDefault();
+  sound.init();
+  const pos = getPointerPos(e);
+
+  // 右上のBGMミュート切替ボタン判定
+  if (pos.x > W - 70 && pos.y < 60) {
+    sound.isMuted = !sound.isMuted;
+    return;
+  }
+
+  if (gameState === 'BUILD' && !snappingPart) {
+    // 3択カードの上を触ったか判定
+    for (let i = 0; i < cardRects.length; i++) {
+      const r = cardRects[i];
+      if (pos.x >= r.x && pos.x <= r.x + r.w && pos.y >= r.y && pos.y <= r.y + r.h) {
+        activeDrag = {
+          choiceIndex: i,
+          part: choices[i].part,
+          slotKey: choices[i].slotKey,
+          x: pos.x,
+          y: pos.y,
+          startX: pos.x,
+          startY: pos.y,
+          moved: false
+        };
+        choices[i].wobble = 1.0;
+        sound.playPickup();
+        break;
+      }
+    }
+  } else if (gameState === 'READY') {
+    // 完成後の「GO!!」ペダルまたは画面タッチで発進
+    startDriveMode();
+  } else if (gameState === 'DRIVE') {
+    // 走行中に右上の「つぎのくるま」ボタンを押したらガレージへ戻る
+    if (pos.x < 180 && pos.y < 75) {
+      initNewCar();
+      return;
+    }
+    // 走行中の画面タップ：ジャンプ＆ホーン＆加速！
+    triggerDriveAction(pos.x, pos.y);
+  }
+}
+
+function onPointerMove(e) {
+  e.preventDefault();
+  if (!activeDrag) return;
+  const pos = getPointerPos(e);
+  const dist = Math.hypot(pos.x - activeDrag.startX, pos.y - activeDrag.startY);
+  // 20px以上スライドしたらドラッグ開始（単純な連打と区別）
+  if (dist > 20) {
+    activeDrag.moved = true;
+  }
+  activeDrag.x = pos.x;
+  activeDrag.y = pos.y;
+}
+
+function onPointerUp(e) {
+  e.preventDefault();
+  if (!activeDrag) return;
+
+  // スライドして画面のトレイより上（車のエリア）まで持ってきたらマグネット吸着！
+  const dropThresholdY = trayY - 15;
+  if (activeDrag.moved && activeDrag.y < dropThresholdY) {
+    const slotDef = SLOTS[currentStep];
+    const targetX = carCenter.x + slotDef.anchor.x * carCenter.scale;
+    const targetY = carCenter.y + slotDef.anchor.y * carCenter.scale;
+
+    snappingPart = {
+      part: activeDrag.part,
+      slotKey: activeDrag.slotKey,
+      x: activeDrag.x,
+      y: activeDrag.y,
+      targetX,
+      targetY,
+      progress: 0
+    };
+  } else {
+    // 連打しただけ、または下で離した場合は元のトレイへボヨンと戻る
+    sound.playReturn();
+  }
+
+  activeDrag = null;
+}
+
+canvas.addEventListener('touchstart', onPointerDown, { passive: false });
+canvas.addEventListener('touchmove', onPointerMove, { passive: false });
+canvas.addEventListener('touchend', onPointerUp, { passive: false });
+canvas.addEventListener('mousedown', onPointerDown);
+window.addEventListener('mousemove', onPointerMove);
+window.addEventListener('mouseup', onPointerUp);
+
+/**
+ * ==========================================
+ * 7. 合体完了・走行モード演出
+ * ==========================================
+ */
+function completePartInstall(slotKey, part) {
+  installedParts[slotKey] = part;
+  preferredTheme = part.theme; // 選んだシリーズを記憶して次の3択に反映
+  sound.playSnap();
+
+  // 車体がガシャンと沈み込むサスペンション反動
+  carBounceVy = 14;
+
+  // 合体箇所にキラキラ火花エフェクト
+  const slotDef = SLOTS[currentStep];
+  const px = carCenter.x + slotDef.anchor.x * carCenter.scale;
+  const py = carCenter.y + slotDef.anchor.y * carCenter.scale;
+  for (let i = 0; i < 16; i++) {
+    const ang = (Math.PI * 2 / 16) * i;
+    const spd = 4 + Math.random() * 6;
+    particles.push({
+      x: px,
+      y: py,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd,
+      size: 8 + Math.random() * 8,
+      color: i % 2 === 0 ? '#ffbe0b' : '#ffffff',
+      life: 1.0
+    });
+  }
+
+  currentStep++;
+  if (currentStep >= SLOTS.length) {
+    // 10パーツすべて完成！
+    gameState = 'READY';
+    sound.playComplete();
+  } else {
+    generateChoicesForStep(currentStep);
+  }
+}
+
+function startDriveMode() {
+  gameState = 'DRIVE';
+  driveTime = 0;
+  roadScroll = 0;
+  carDriveX = W * 0.5;
+  carDriveY = H * 0.56;
+  carJumpVy = 0;
+  carWheelie = 0;
+  boostTimer = 0;
+  sound.playEngineRev();
+  sound.startBGM('drive');
+}
+
+function triggerDriveAction(tx, ty) {
+  const mainTheme = installedParts.cabin?.theme || 'police';
+  sound.playActionSound(mainTheme);
+
+  // ジャンプ＆ウィリー＆加速
+  if (carBounceY >= -5) {
+    carBounceVy = -18;
+  }
+  carWheelie = 0.16;
+  boostTimer = 45;
+
+  // タップした場所にも楽しい星エフェクト
+  for (let i = 0; i < 10; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = 3 + Math.random() * 6;
+    particles.push({
+      x: tx,
+      y: ty,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd,
+      size: 10 + Math.random() * 10,
+      color: ['#ffbe0b', '#ff006e', '#3a86ff', '#06d6a0'][i % 4],
+      life: 1.0
+    });
+  }
+}
+
+/**
+ * ==========================================
+ * 8. メインループ＆画面描画
+ * ==========================================
+ */
+let lastTime = performance.now();
+
+function loop(now) {
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  const animTime = now / 1000;
+
+  // バウンス物理更新
+  carBounceY += carBounceVy;
+  carBounceVy += (0 - carBounceY) * 0.25;
+  carBounceVy *= 0.78;
+
+  if (gameState === 'BUILD' || gameState === 'READY') {
+    drawGarageScene(animTime);
+  } else if (gameState === 'DRIVE') {
+    updateAndDrawDriveScene(animTime, dt);
+  }
+
+  // パーティクル更新・描画
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= 0.03;
+    if (p.life <= 0) {
+      particles.splice(i, 1);
+      continue;
+    }
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // 右上のBGMミュートアイコン
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath();
+  ctx.roundRect(W - 60, 12, 48, 42, 10);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(sound.isMuted ? '🔇' : '🔊', W - 36, 41);
+  ctx.restore();
+
+  requestAnimationFrame(loop);
+}
+
+// ガレージ（組み立て画面）の描画
+function drawGarageScene(animTime) {
+  // ガレージ背景
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#2b3a4a');
+  bgGrad.addColorStop(0.62, '#1b2631');
+  bgGrad.addColorStop(0.62, '#343a40');
+  bgGrad.addColorStop(1, '#212529');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  // ガレージのリフト台座
+  ctx.fillStyle = '#495057';
+  ctx.fillRect(carCenter.x - 220 * carCenter.scale, carCenter.y + 105 * carCenter.scale, 440 * carCenter.scale, 16);
+
+  // 進捗バー（1〜10ステップの丸アイコン）
+  const barW = Math.min(W * 0.75, 520);
+  const startBarX = (W - barW) / 2;
+  for (let i = 0; i < SLOTS.length; i++) {
+    const bx = startBarX + (barW / (SLOTS.length - 1)) * i;
+    const by = 32;
+    ctx.beginPath();
+    ctx.arc(bx, by, i === currentStep ? 13 : 9, 0, Math.PI * 2);
+    ctx.fillStyle = i < currentStep ? '#06d6a0' : (i === currentStep ? '#ffbe0b' : '#495057');
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#fff';
+    ctx.stroke();
+  }
+
+  // 現在のガイドテキスト
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 24px sans-serif';
+  ctx.textAlign = 'center';
+  if (gameState === 'BUILD') {
+    ctx.fillText(`${SLOTS[currentStep].label} を えらんで スライド！`, W / 2, 76);
+  } else {
+    ctx.fillStyle = '#ffbe0b';
+    ctx.font = 'bold 30px sans-serif';
+    ctx.fillText('✨ かんせい！ くるまを タッチして しゅっぱつ！ ✨', W / 2, 78);
+  }
+
+  // 組み立て中の車を描画
+  drawAssembledCar(ctx, carCenter.x, carCenter.y, carCenter.scale, animTime, false);
+
+  // マグネット吸着中のアニメーション更新
+  if (snappingPart) {
+    snappingPart.progress += 0.18;
+    const t = Math.min(snappingPart.progress, 1);
+    const ease = 1 - Math.pow(1 - t, 3);
+    const curX = snappingPart.x + (snappingPart.targetX - snappingPart.x) * ease;
+    const curY = snappingPart.y + (snappingPart.targetY - snappingPart.y) * ease;
+
+    ctx.save();
+    ctx.translate(curX, curY);
+    ctx.scale(carCenter.scale, carCenter.scale);
+    drawSinglePart(ctx, snappingPart.slotKey, snappingPart.part, animTime, false);
+    ctx.restore();
+
+    if (t >= 1) {
+      const done = snappingPart;
+      snappingPart = null;
+      completePartInstall(done.slotKey, done.part);
+    }
+  }
+
+  // 下部の3択トレイ描画
+  if (gameState === 'BUILD') {
+    choices.forEach((choice, idx) => {
+      const r = cardRects[idx];
+      if (choice.wobble > 0) choice.wobble = Math.max(0, choice.wobble - 0.08);
+      const isDraggingThis = activeDrag && activeDrag.choiceIndex === idx && activeDrag.moved;
+
+      ctx.save();
+      const wobAngle = Math.sin(choice.wobble * Math.PI * 4) * 0.08 * choice.wobble;
+      ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+      ctx.rotate(wobAngle);
+
+      // カード背景（トミカの箱のようなデザイン）
+      ctx.globalAlpha = isDraggingThis ? 0.35 : 1.0;
+      drawGlossyBox(ctx, -r.w / 2, -r.h / 2, r.w, r.h, 20, '#f8f9fa', '#adb5bd');
+
+      // 上向き矢印ガイド
+      ctx.fillStyle = '#adb5bd';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('▲ うえへ スライド', 0, -r.h / 2 + 24);
+
+      // カード内のパーツプレビュー
+      ctx.save();
+      ctx.translate(0, 8);
+      ctx.scale(0.75, 0.75);
+      drawSinglePart(ctx, choice.slotKey, choice.part, animTime, false);
+      ctx.restore();
+
+      // パーツ名ラベル
+      ctx.fillStyle = '#212529';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText(choice.part.name, 0, r.h / 2 - 14);
+      ctx.restore();
+    });
+
+    // 指でドラッグ中のパーツを最前面に大きく描画
+    if (activeDrag && activeDrag.moved) {
+      ctx.save();
+      ctx.translate(activeDrag.x, activeDrag.y - 30);
+      ctx.scale(carCenter.scale * 1.08, carCenter.scale * 1.08);
+      drawSinglePart(ctx, activeDrag.slotKey, activeDrag.part, animTime, false);
+      ctx.restore();
+    }
+  } else if (gameState === 'READY') {
+    // 完成時の大きな「GO!!」アクセルボタン
+    const btnW = 320;
+    const btnH = 110;
+    const bx = (W - btnW) / 2;
+    const by = H * 0.72;
+    const pulse = 1 + Math.sin(animTime * 8) * 0.06;
+
+    ctx.save();
+    ctx.translate(bx + btnW / 2, by + btnH / 2);
+    ctx.scale(pulse, pulse);
+    drawGlossyBox(ctx, -btnW / 2, -btnH / 2, btnW, btnH, 30, '#06d6a0', '#ffffff');
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 44px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('🚀 GO!! しゅっぱつ', 0, 15);
+    ctx.restore();
+  }
+}
+
+// 走行モードの更新＆描画
+function updateAndDrawDriveScene(animTime, dt) {
+  driveTime += dt;
+  const speed = boostTimer > 0 ? 18 : 10;
+  if (boostTimer > 0) boostTimer--;
+
+  roadScroll = (roadScroll + speed) % 120;
+  carWheelie *= 0.9;
+
+  // 昼の青空と街並み背景
+  const skyGrad = ctx.createLinearGradient(0, 0, 0, H * 0.65);
+  skyGrad.addColorStop(0, '#4cc9f0');
+  skyGrad.addColorStop(1, '#caf0f8');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, W, H * 0.65);
+
+  // 流れる雲と山・ビル（車は左向きなので背景は左から右へ流れる）
+  ctx.fillStyle = '#90e0ef';
+  for (let i = -1; i < 5; i++) {
+    const hillX = ((i * 350 + driveTime * 90) % (W + 400)) - 200;
+    ctx.beginPath();
+    ctx.arc(hillX, H * 0.65, 160, Math.PI, 0);
+    ctx.fill();
+  }
+
+  // アスファルト道路
+  ctx.fillStyle = '#495057';
+  ctx.fillRect(0, H * 0.62, W, H * 0.38);
+  ctx.fillStyle = '#06d6a0';
+  ctx.fillRect(0, H * 0.60, W, H * 0.04);
+
+  // 道路の白線スクロール
+  ctx.fillStyle = '#ffffff';
+  for (let x = -120 + roadScroll; x < W + 120; x += 120) {
+    ctx.fillRect(x, H * 0.78, 65, 14);
+  }
+
+  // 走っているカスタムカーを描画
+  drawAssembledCar(ctx, W * 0.5, H * 0.58, carCenter.scale * 1.15, animTime, true);
+
+  // タイヤからの土煙・ターボ火花
+  if (Math.random() < (boostTimer > 0 ? 0.8 : 0.3)) {
+    particles.push({
+      x: W * 0.5 + 130 * carCenter.scale,
+      y: H * 0.58 + 85 * carCenter.scale,
+      vx: 6 + Math.random() * 5,
+      vy: -1 - Math.random() * 3,
+      size: boostTimer > 0 ? 14 : 9,
+      color: boostTimer > 0 ? '#ffbe0b' : 'rgba(220,220,220,0.7)',
+      life: 0.8
+    });
+  }
+
+  // 左上の「つぎのくるまをつくる」ボタン
+  ctx.save();
+  drawGlossyBox(ctx, 16, 16, 165, 54, 16, '#ffbe0b', '#fff');
+  ctx.fillStyle = '#212529';
+  ctx.font = 'bold 18px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('🔧 つぎのくるま', 98, 49);
+  ctx.restore();
+
+  // 下部ガイド
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 26px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('がめんを タッチすると ジャンプ ＆ サイレン！', W / 2, H - 28);
+}
+
+// 初回起動
+initNewCar();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
